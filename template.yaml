@@ -1,0 +1,184 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  ppgpt-backend
+
+  Sample SAM Template for ppgpt-backend
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 120
+    MemorySize: 512
+    Tracing: Active
+  Api:
+    TracingEnabled: true
+  
+Resources:
+
+  PPgptLamdaFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaFunctionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Add required permissions here, for example:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+              # Add permissions for the processChunk Lambda function
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt SQSQueue.Arn
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:verifyEmailIdentity
+                  - ses:ListIdentities
+                Resource: '*'
+        - PolicyName: SecretManagerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: arn:aws:secretsmanager:*:*:secret:OpenAIAPISecret-*
+
+  ProcessChunkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Architectures:
+      - x86_64
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref SQSQueue
+          REGION: !Ref AWS::Region
+          BUCKET_NAME: !Ref S3Bucket
+      Role: !GetAtt PPgptLamdaFunctionRole.Arn
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SQSQueue.Arn
+            BatchSize: 1
+    Metadata:
+      DockerTag: nodejs18.x-v1
+      DockerContext: ./src/lambdas/process-chunk
+      Dockerfile: Dockerfile
+
+  
+  EnqueueChunksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      Architectures:
+      - x86_64
+      Role: !GetAtt PPgptLamdaFunctionRole.Arn
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref SQSQueue
+          REGION: !Ref AWS::Region
+          BATCH_SIZE: 10
+          DELAY_S: 1
+      Events:
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref S3Bucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: input/
+                  - Name: suffix
+                    Value: .json
+    Metadata:
+      DockerTag: nodejs18.x-v1
+      DockerContext: ./src/lambdas/enqueue-chunks
+      Dockerfile: Dockerfile
+
+  SQSQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ppgpt-queue
+      VisibilityTimeout: 120
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: ppgpt-bucket
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action: s3:GetObject
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt PPgptLamdaFunctionRole.Arn
+            Resource: !Sub "arn:aws:s3:::${S3Bucket}/*"
+          - Action:
+              - s3:PutObject
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt PPgptLamdaFunctionRole.Arn
+            Resource: !Join [ '', [ 'arn:aws:s3:::', !Ref S3Bucket, '/output/*' ] ]
+
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SQSQueue
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !GetAtt PPgptLamdaFunctionRole.Arn
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+            Resource: !GetAtt SQSQueue.Arn
+
+  MySESResource:
+    Type: AWS::SES::ConfigurationSet
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name:
+        Fn::Sub: ApplicationInsights-SAM-${AWS::StackName}
+      ResourceQuery:
+        Type: CLOUDFORMATION_STACK_1_0
+  ApplicationInsightsMonitoring:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName:
+        Ref: ApplicationResourceGroup
+      AutoConfigurationEnabled: 'true'
+
