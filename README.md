@@ -11,6 +11,23 @@ ProcessChunkFunction: This function processes individual data chunks retrieved f
 
 EnqueueChunksFunction: This function is triggered by new objects being created in the specified S3 bucket. It reads the newly created files, performs necessary transformations, and enqueues the resulting chunks into the SQS queue for further processing.
 
+## Architecture
+
+```mermaid
+flowchart TD
+    Input["JSON file uploaded to S3 input/ (.json)"] --> Enqueue["EnqueueChunksFunction<br/>Read data array and split into groups of up to 10"]
+    Enqueue --> SQS["SQS ppgpt-queue<br/>One message per record; uid and email attributes"]
+    SQS --> Process["ProcessChunkFunction<br/>Triggered for one message at a time"]
+    Process --> Prompt["Build prompt from URL, tags, title,<br/>meta description, and prompt fields"]
+    Secret["AWS Secrets Manager<br/>OpenAI API key"] --> Process
+    Prompt --> OpenAI["OpenAI text-davinci-003"]
+    OpenAI --> Result["Add completion as Open AI Response"]
+    Result --> CSV["Check/create or append CSV"]
+    CSV --> Output["S3 output/output{uid}.csv<br/>uid and email metadata"]
+    Enqueue --> Notify["Create empty output CSV,<br/>generate 24-hour signed URL,<br/>email link through SES"]
+    Notify -. "This notification is sent after enqueueing,<br/>not after all messages finish processing" .-> Output
+```
+
 ## Prerequisites
 Before deploying the ppgpt-backend application, ensure that you have the following prerequisites:
 
